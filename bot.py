@@ -8,6 +8,13 @@ from discord.ext import commands
 import config
 from brain import Brain, normalize_text
 from memory import MemoryManager
+from parser import (
+    has_hey_vict_trigger,
+    extract_trigger_input,
+    is_yggdrasil_message,
+    parse_yggdrasil_transcript,
+    resolve_yggdrasil_user,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -29,14 +36,88 @@ class VictBot(commands.Bot):
 
     def __init__(self):
         intents = discord.Intents.default()
+        intents.message_content = True  # Enable Message Content intent for listening to ordinary messages
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         """Called when the bot is setting up. Registers app commands."""
         logger.info("Registering Discord slash commands...")
-        # Sync slash commands with Discord
         await self.tree.sync()
         logger.info("Slash commands synced successfully.")
+
+    async def on_message(self, message: discord.Message):
+        """Handles incoming messages for passive 'hey vict' triggers and Yggdrasil transcripts."""
+        # Rule 3 & 21: Ignore Vict's own messages
+        if self.user and (message.author == self.user or message.author.id == self.user.id):
+            return
+
+        # Check if message matches Yggdrasil transcript format
+        if is_yggdrasil_message(
+            message.content,
+            author_is_bot=message.author.bot,
+            author_name=message.author.name,
+        ):
+            parsed_entries = parse_yggdrasil_transcript(message.content)
+            if not parsed_entries:
+                return
+
+            # Find indices of entries containing 'hey vict'
+            trigger_indices = [
+                i for i, entry in enumerate(parsed_entries)
+                if has_hey_vict_trigger(entry["text"])
+            ]
+
+            if not trigger_indices:
+                return
+
+            # Rule 8: Use the last/latest trigger occurrence as the active request
+            active_index = trigger_indices[-1]
+
+            # Preserve prior parsed entries in conversation memory
+            for i in range(active_index):
+                prev_entry = parsed_entries[i]
+                uid, uname = resolve_yggdrasil_user(message.guild, prev_entry["username"])
+                memory_mgr.add_message(
+                    user_id=uid,
+                    username=uname,
+                    content=prev_entry["text"],
+                    role="user",
+                )
+
+            # Active trigger entry
+            active_entry = parsed_entries[active_index]
+            speaker_uid, speaker_uname = resolve_yggdrasil_user(
+                message.guild, active_entry["username"]
+            )
+            semantic_input = extract_trigger_input(active_entry["text"])
+
+            await process_chat_response(
+                destination=message.channel,
+                user_id=speaker_uid,
+                username=speaker_uname,
+                display_input=active_entry["text"],
+                semantic_input=semantic_input,
+            )
+            return
+
+        # Rule 21: Ignore unrelated bot messages
+        if message.author.bot:
+            return
+
+        # Ordinary user message check
+        if has_hey_vict_trigger(message.content):
+            # Rule 4: Use real Discord username/handle as identity, Discord user ID as stable key
+            username = message.author.name  # username/handle, not nickname/display name
+            user_id = str(message.author.id)
+            semantic_input = extract_trigger_input(message.content)
+
+            await process_chat_response(
+                destination=message.channel,
+                user_id=user_id,
+                username=username,
+                display_input=message.content,
+                semantic_input=semantic_input,
+            )
 
 
 bot = VictBot()
@@ -45,7 +126,7 @@ check_group = app_commands.Group(name="check", description="Check Vict's operati
 
 @check_group.command(name="status", description="Show Vict status and memory stats")
 async def check_status(interaction: discord.Interaction):
-    """Public status command showing AI, short-term memory count, and persistent memory size."""
+    """Public status command showing AI, short-term memory count, persistent memory size, and configured limits."""
     ai_status = "Online (Model loaded)" if brain.is_ready() else "Offline (Model not loaded)"
     st_count = memory_mgr.get_short_term_count()
     pm_size = memory_mgr.get_persistent_memory_size()
@@ -54,7 +135,8 @@ async def check_status(interaction: discord.Interaction):
         f"**Vict Status**\n"
         f"• AI/Model: {ai_status}\n"
         f"• Short-term Memory: {st_count}/49 messages\n"
-        f"• Persistent Memory Size: {pm_size} characters"
+        f"• Persistent Memory Size: {pm_size} characters\n"
+        f"• Configured Limits: MAX_INPUT_CHARS={config.MAX_INPUT_CHARS}, MAX_MEMORY_TOKENS={config.MAX_MEMORY_TOKENS}"
     )
 
     await interaction.response.send_message(status_text, ephemeral=False)
@@ -67,74 +149,75 @@ bot.tree.add_command(check_group)
 @app_commands.describe(input="Your message to Vict")
 async def talk(interaction: discord.Interaction, input: str):
     """Main interaction command for Vict."""
-    # 1. Validate input character count against MAX_INPUT_CHARS
-    if len(input) > config.MAX_INPUT_CHARS:
-        await interaction.response.send_message(
-            f"max chars exceeded.\nmaximum allowed: {config.MAX_INPUT_CHARS} characters.",
-            ephemeral=False,
-        )
+    username = interaction.user.name
+    user_id = str(interaction.user.id)
+
+    await process_chat_response(
+        destination=interaction,
+        user_id=user_id,
+        username=username,
+        display_input=input,
+        semantic_input=input,
+    )
+
+
+async def process_chat_response(
+    destination,
+    user_id: str,
+    username: str,
+    display_input: str,
+    semantic_input: str,
+):
+    """
+    Validates input, sends formatted header, streams AI generation, and saves into short-term/persistent memory.
+    destination can be a discord.Interaction or a discord.abc.Messageable (TextChannel, Thread, etc.).
+    """
+    # Enforce MAX_INPUT_CHARS on semantic input
+    effective_input = semantic_input if semantic_input else display_input
+    if len(effective_input) > config.MAX_INPUT_CHARS:
+        err_msg = f"max chars exceeded.\nmaximum allowed: {config.MAX_INPUT_CHARS} characters."
+        if isinstance(destination, discord.Interaction):
+            await destination.response.send_message(err_msg, ephemeral=False)
+        else:
+            await destination.send(err_msg)
         return
 
-    # User handle/identity handling
-    username = interaction.user.name  # @username/handle without nickname
-    user_id = interaction.user.id  # Stable numeric user ID
+    clean_display = normalize_text(display_input)
+    clean_semantic = normalize_text(semantic_input) if semantic_input else clean_display
 
-    # Clean and normalize input string for layout safety
-    normalized_input = normalize_text(input)
-
-    # 2. Defer or initial response
-    # Format message header
-    header = f"@{username}: {normalized_input}\n\n`"
+    header = f"@{username.lstrip('@')}: {clean_display}\n\n`"
     initial_text = f"{header}...`"
 
-    await interaction.response.send_message(initial_text, ephemeral=False)
-    message = await interaction.original_response()
+    if isinstance(destination, discord.Interaction):
+        await destination.response.send_message(initial_text, ephemeral=False)
+        message = await destination.original_response()
+    else:
+        message = await destination.send(initial_text)
 
-    # Load persona and persistent memory
     persona = config.load_persona()
     persistent_mem = memory_mgr.get_persistent_memory()
     short_term_ctx = memory_mgr.get_short_term_context()
 
-    # Rate limited edit queue parameters
     last_edit_time = 0.0
-    MIN_EDIT_INTERVAL = 0.8  # Edit at most every 0.8s to respect Discord rate limits
+    MIN_EDIT_INTERVAL = 0.8
     latest_response_text = "..."
-
     final_generated_text = ""
 
-    # Stream generation in background loop
     loop = asyncio.get_running_loop()
 
-    # Helper function to run sync generator in threadpool
-    def sync_generator():
-        return list(
-            brain.generate_talk_stream(
-                persona=persona,
-                persistent_memory=persistent_mem,
-                short_term_context=short_term_ctx,
-                current_username=username,
-                current_user_input=normalized_input,
-            )
-        )
-
-    # We run the generator yielding steps
-    # To provide visible streaming, we process stream tokens in a thread executor
     def fetch_stream_tokens():
         return brain.generate_talk_stream(
             persona=persona,
             persistent_memory=persistent_mem,
             short_term_context=short_term_ctx,
             current_username=username,
-            current_user_input=normalized_input,
+            current_user_input=clean_semantic,
         )
 
     try:
-        # Obtain generator
         token_stream = await loop.run_in_executor(None, fetch_stream_tokens)
 
-        # Iterate over streamed partials safely
         while True:
-            # Get next chunk in executor to not block event loop
             chunk = await loop.run_in_executor(None, lambda: next(token_stream, None))
             if chunk is None:
                 break
@@ -144,7 +227,7 @@ async def talk(interaction: discord.Interaction, input: str):
 
             now = loop.time()
             if now - last_edit_time >= MIN_EDIT_INTERVAL:
-                updated_content = f"@{username}: {normalized_input}\n\n`{latest_response_text}`"
+                updated_content = f"@{username.lstrip('@')}: {clean_display}\n\n`{latest_response_text}`"
                 try:
                     await message.edit(content=updated_content)
                     last_edit_time = now
@@ -156,25 +239,21 @@ async def talk(interaction: discord.Interaction, input: str):
         if not final_generated_text:
             final_generated_text = "Sorry, I ran into an error generating a reply."
 
-    # Final edit ensuring full response is displayed with proper backticks
-    final_content = f"@{username}: {normalized_input}\n\n`{final_generated_text}`"
+    final_content = f"@{username.lstrip('@')}: {clean_display}\n\n`{final_generated_text}`"
     try:
         await message.edit(content=final_content)
     except discord.HTTPException as e:
         logger.error(f"Final message edit failed: {e}")
 
-    # Record messages into short-term buffer
-    # 1) User message
-    user_trigger_consolidate = memory_mgr.add_message(
-        user_id=user_id, username=username, content=normalized_input, role="user"
+    # Record user message and Vict response into memory
+    u_trig = memory_mgr.add_message(
+        user_id=user_id, username=username, content=clean_display, role="user"
     )
-    # 2) Vict response
-    vict_trigger_consolidate = memory_mgr.add_message(
+    v_trig = memory_mgr.add_message(
         user_id="vict", username="Vict", content=final_generated_text, role="assistant"
     )
 
-    # Check if 50 messages threshold reached
-    if user_trigger_consolidate or vict_trigger_consolidate:
+    if u_trig or v_trig:
         logger.info("Short-term memory reached 50 messages! Triggering memory consolidation...")
 
         def run_consolidation():
