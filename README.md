@@ -8,6 +8,10 @@ Vict is a clean, lightweight, local-only Discord AI bot with persistent memory. 
 
 - **100% Local Execution**: Runs locally using GGUF models via `llama-cpp-python`. No cloud AI APIs or Ollama required.
 - **Low Memory Footprint**: Designed to stay well under ~2 GB RAM.
+- **Global FIFO AI Generation Queue**:
+  - Uses a single local GGUF model instance to keep RAM usage low.
+  - Processes incoming `/talk` commands and passive `hey vict` triggers sequentially in first-in, first-out (FIFO) order.
+  - Simultaneous requests wait cleanly in queue without blocking Discord's event loop or causing race conditions.
 - **Passive Trigger (`hey vict`)**: Listens to ordinary Discord messages and responds when the message **starts with** `hey vict` (case-insensitive).
 - **Persistent & Short-Term Memory**:
   - Retains the 49 most recent messages as active short-term context.
@@ -26,7 +30,7 @@ Vict is a clean, lightweight, local-only Discord AI bot with persistent memory. 
 ```text
 Vict/
 ├── START.bat        # Windows launcher (verifies Python 3.14, dependencies, model, and runs Vict)
-├── bot.py           # Discord client, on_message handler, and slash commands (/check status, /talk)
+├── bot.py           # Discord client, on_message handler, global FIFO queue, and slash commands
 ├── brain.py         # Local GGUF model loader, prompt builder, single-line text normalizer
 ├── memory.py        # Short-term buffer & atomic persistent memory manager
 ├── parser.py        # 'hey vict' start-of-message trigger detection & extraction
@@ -99,6 +103,19 @@ python3 bot.py
 
 ---
 
+## Global FIFO Generation Queue Architecture
+
+Vict operates on low-resource hardware (~2 GB RAM) with a single local GGUF model instance.
+
+To prevent concurrent inference conflicts, race conditions, or elevated memory usage, Vict implements a single global asynchronous FIFO queue (`asyncio.Queue` + background worker):
+
+- Requests from `/talk` and passive `hey vict` triggers are placed into the shared queue upon receipt.
+- Requests are processed sequentially in strict arrival order (A → B → C).
+- Model generation runs asynchronously in a worker thread (`asyncio.to_thread`) to ensure Discord's event loop remains fully responsive.
+- Operating status can be monitored using `/check status` (reports `AI/Model: Ready` vs `Generating` and `Queue Waiting: X`).
+
+---
+
 ## Interaction Methods
 
 ### 1. Passive Trigger (`hey vict`)
@@ -108,7 +125,7 @@ Vict responds to normal messages **only when they start with `hey vict`** (case-
 - **Does NOT trigger**: `yo hey vict`, `well hey vict`, `heyy vict`, `heyvict`, `hey victory`
 
 ### 2. Slash Commands
-- `/check status`: Displays operational status, local model availability, short-term message count, persistent memory size, and configured limits.
+- `/check status`: Displays operational status, AI status (`Ready` / `Generating`), waiting queue length, short-term message count, persistent memory size, and configured limits.
 - `/talk [input]`: Explicit slash command interaction with full input validation and rate-limited response streaming.
 
 ---
