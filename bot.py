@@ -8,13 +8,7 @@ from discord.ext import commands
 import config
 from brain import Brain, normalize_text
 from memory import MemoryManager
-from parser import (
-    has_hey_vict_trigger,
-    extract_trigger_input,
-    is_yggdrasil_message,
-    parse_yggdrasil_transcript,
-    resolve_yggdrasil_user,
-)
+from parser import has_hey_vict_trigger, extract_trigger_input
 
 # Configure logging
 logging.basicConfig(
@@ -46,67 +40,14 @@ class VictBot(commands.Bot):
         logger.info("Slash commands synced successfully.")
 
     async def on_message(self, message: discord.Message):
-        """Handles incoming messages for passive 'hey vict' triggers and Yggdrasil transcripts."""
-        # Rule 3 & 21: Ignore Vict's own messages
-        if self.user and (message.author == self.user or message.author.id == self.user.id):
-            return
-
-        # Check if message matches Yggdrasil transcript format
-        if is_yggdrasil_message(
-            message.content,
-            author_is_bot=message.author.bot,
-            author_name=message.author.name,
-        ):
-            parsed_entries = parse_yggdrasil_transcript(message.content)
-            if not parsed_entries:
-                return
-
-            # Find indices of entries containing 'hey vict'
-            trigger_indices = [
-                i for i, entry in enumerate(parsed_entries)
-                if has_hey_vict_trigger(entry["text"])
-            ]
-
-            if not trigger_indices:
-                return
-
-            # Rule 8: Use the last/latest trigger occurrence as the active request
-            active_index = trigger_indices[-1]
-
-            # Preserve prior parsed entries in conversation memory
-            for i in range(active_index):
-                prev_entry = parsed_entries[i]
-                uid, uname = resolve_yggdrasil_user(message.guild, prev_entry["username"])
-                memory_mgr.add_message(
-                    user_id=uid,
-                    username=uname,
-                    content=prev_entry["text"],
-                    role="user",
-                )
-
-            # Active trigger entry
-            active_entry = parsed_entries[active_index]
-            speaker_uid, speaker_uname = resolve_yggdrasil_user(
-                message.guild, active_entry["username"]
-            )
-            semantic_input = extract_trigger_input(active_entry["text"])
-
-            await process_chat_response(
-                destination=message.channel,
-                user_id=speaker_uid,
-                username=speaker_uname,
-                display_input=active_entry["text"],
-                semantic_input=semantic_input,
-            )
-            return
-
-        # Rule 21: Ignore unrelated bot messages
+        """Handles incoming messages for strict 'hey vict' start triggers."""
+        # Ignore all bot messages (including Vict's own messages and Yggdrasil)
         if message.author.bot:
             return
 
-        # Ordinary user message check
+        # Ordinary user message check for start-of-message 'hey vict'
         if has_hey_vict_trigger(message.content):
-            # Rule 4: Use real Discord username/handle as identity, Discord user ID as stable key
+            # Use real Discord username/handle as identity, Discord user ID as stable key
             username = message.author.name  # username/handle, not nickname/display name
             user_id = str(message.author.id)
             semantic_input = extract_trigger_input(message.content)
