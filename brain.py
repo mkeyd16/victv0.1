@@ -7,9 +7,28 @@ import config
 logger = logging.getLogger("Vict.Brain")
 
 try:
+    import llama_cpp
     from llama_cpp import Llama
 except ImportError:
+    llama_cpp = None
     Llama = None
+
+
+def get_ggml_type(type_str: str) -> Optional[int]:
+    """Helper to convert cache type string (f16, f32, q8_0, etc) to GGML integer enum."""
+    if llama_cpp is None:
+        return None
+    type_clean = type_str.lower().strip()
+    mapping = {
+        "f32": getattr(llama_cpp, "GGML_TYPE_F32", 0),
+        "f16": getattr(llama_cpp, "GGML_TYPE_F16", 1),
+        "q8_0": getattr(llama_cpp, "GGML_TYPE_Q8_0", 8),
+        "q4_0": getattr(llama_cpp, "GGML_TYPE_Q4_0", 2),
+        "q4_1": getattr(llama_cpp, "GGML_TYPE_Q4_1", 3),
+        "q5_0": getattr(llama_cpp, "GGML_TYPE_Q5_0", 6),
+        "q5_1": getattr(llama_cpp, "GGML_TYPE_Q5_1", 7),
+    }
+    return mapping.get(type_clean, getattr(llama_cpp, "GGML_TYPE_F16", 1))
 
 
 def normalize_text(text: str) -> str:
@@ -33,7 +52,7 @@ def normalize_text(text: str) -> str:
 
 
 class Brain:
-    """Inference and prompt construction engine using llama.cpp."""
+    """Inference and prompt construction engine using llama.cpp with low RAM configuration."""
 
     def __init__(self, model_path: str = config.MODEL_PATH):
         self.model_path = Path(model_path)
@@ -41,7 +60,7 @@ class Brain:
         self._init_model()
 
     def _init_model(self):
-        """Initialize local GGUF model with lightweight RAM settings."""
+        """Initialize local GGUF model with explicit low-memory settings."""
         if not self.model_path.exists():
             logger.warning(
                 f"Model file not found at {self.model_path}. AI features will not function until model is downloaded."
@@ -53,15 +72,28 @@ class Brain:
             return
 
         try:
-            logger.info(f"Loading local model from {self.model_path}...")
-            # Low context window (n_ctx=2048) and n_threads=4 to ensure RAM <= 2GB
+            logger.info(
+                f"Loading local model from {self.model_path} "
+                f"(n_ctx={config.N_CTX}, n_batch={config.N_BATCH}, n_ubatch={config.N_UBATCH}, "
+                f"n_threads={config.N_THREADS}, mmap={config.USE_MMAP}, mlock={config.USE_MLOCK})..."
+            )
+
+            type_k = get_ggml_type(config.CACHE_TYPE_K)
+            type_v = get_ggml_type(config.CACHE_TYPE_V)
+
             self.llm = Llama(
                 model_path=str(self.model_path),
-                n_ctx=2048,
-                n_threads=4,
+                n_ctx=config.N_CTX,
+                n_batch=config.N_BATCH,
+                n_ubatch=config.N_UBATCH,
+                n_threads=config.N_THREADS,
+                use_mmap=config.USE_MMAP,
+                use_mlock=config.USE_MLOCK,
+                type_k=type_k,
+                type_v=type_v,
                 verbose=False,
             )
-            logger.info("Local model loaded successfully.")
+            logger.info("Local model loaded successfully with RAM optimizations.")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             self.llm = None
@@ -191,6 +223,7 @@ class Brain:
     ) -> str:
         """
         Merges existing memory + 50 new conversation messages into a single updated persistent memory.
+        Uses the exact same single model instance.
         """
         if not self.is_ready():
             logger.warning("Cannot consolidate memory: Model not ready.")

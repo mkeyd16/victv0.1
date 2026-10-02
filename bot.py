@@ -28,6 +28,31 @@ memory_mgr = MemoryManager()
 brain = Brain()
 
 
+def get_ram_usage_str() -> str:
+    """Returns formatted RAM usage string of the current process (MB or GB)."""
+    try:
+        import psutil
+        process = psutil.Process()
+        mem_bytes = process.memory_info().rss
+        mem_mb = mem_bytes / (1024 * 1024)
+        if mem_mb >= 1024:
+            return f"{mem_mb / 1024:.1f} GB"
+        return f"{mem_mb:.1f} MB"
+    except Exception:
+        pass
+
+    try:
+        import resource
+        mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        if mem_mb >= 1024:
+            return f"{mem_mb / 1024:.1f} GB"
+        return f"{mem_mb:.1f} MB"
+    except Exception:
+        pass
+
+    return "Unknown"
+
+
 @dataclass
 class QueueItem:
     user_id: str
@@ -205,9 +230,9 @@ bot = VictBot()
 check_group = app_commands.Group(name="check", description="Check Vict's operational status")
 
 
-@check_group.command(name="status", description="Show Vict status and memory stats")
+@check_group.command(name="status", description="Show Vict status, RAM, and memory stats")
 async def check_status(interaction: discord.Interaction):
-    """Public status command showing AI status, queue count, short-term memory count, persistent memory size, and configured limits."""
+    """Public status command showing AI status, RAM usage, context size, queue count, short-term memory count, and persistent memory size."""
     if not brain.is_ready():
         ai_status = "Offline (Model not loaded)"
     elif is_generating:
@@ -215,6 +240,7 @@ async def check_status(interaction: discord.Interaction):
     else:
         ai_status = "Ready"
 
+    ram_str = get_ram_usage_str()
     waiting_queue_count = generation_queue.qsize()
     st_count = memory_mgr.get_short_term_count()
     pm_size = memory_mgr.get_persistent_memory_size()
@@ -222,6 +248,8 @@ async def check_status(interaction: discord.Interaction):
     status_text = (
         f"**Vict Status**\n"
         f"• AI/Model: {ai_status}\n"
+        f"• RAM Usage: {ram_str}\n"
+        f"• Context Size: {config.N_CTX}\n"
         f"• Queue Waiting: {waiting_queue_count}\n"
         f"• Short-term Memory: {st_count}/49 messages\n"
         f"• Persistent Memory Size: {pm_size} characters\n"

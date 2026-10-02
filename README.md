@@ -7,9 +7,11 @@ Vict is a clean, lightweight, local-only Discord AI bot with persistent memory. 
 ## Key Features
 
 - **100% Local Execution**: Runs locally using GGUF models via `llama-cpp-python`. No cloud AI APIs or Ollama required.
-- **Low Memory Footprint**: Designed to stay well under ~2 GB RAM.
+- **Low Memory Footprint (~2 GB RAM Target)**:
+  - Uses one single shared local GGUF model instance across chat requests and memory consolidation.
+  - Persistent memory remains strictly disk-backed (`data/memory.txt`) to avoid unnecessary RAM duplication.
+  - Low-memory llama-cpp-python settings (`N_CTX=4096`, `USE_MMAP=true`, `USE_MLOCK=false`, `N_BATCH=128`, `CACHE_TYPE_K/V=f16`).
 - **Global FIFO AI Generation Queue**:
-  - Uses a single local GGUF model instance to keep RAM usage low.
   - Processes incoming `/talk` commands and passive `hey vict` triggers sequentially in first-in, first-out (FIFO) order.
   - Simultaneous requests wait cleanly in queue without blocking Discord's event loop or causing race conditions.
 - **Passive Trigger (`hey vict`)**: Listens to ordinary Discord messages and responds when the message **starts with** `hey vict` (case-insensitive).
@@ -36,7 +38,7 @@ Vict/
 ├── parser.py        # 'hey vict' start-of-message trigger detection & extraction
 ├── config.py        # Environment configuration and file setup
 ├── persona.txt      # Editable bot personality file
-├── .env             # Environment variables (Discord token, limits)
+├── .env             # Environment variables (Discord token, limits, RAM options)
 ├── .env.example     # Example environment configuration
 ├── requirements.txt # Python dependencies
 ├── README.md        # Documentation
@@ -80,10 +82,35 @@ cp .env.example .env
 `.env` configuration options:
 ```env
 DISCORD_TOKEN=your_actual_discord_bot_token
-MAX_INPUT_CHARS=150
+MAX_INPUT_CHARS=200
 MAX_MEMORY_TOKENS=5000
 MODEL_PATH=models/SmolLM2-360M-Instruct-Q4_K_M.gguf
+
+N_CTX=4096
+N_BATCH=128
+N_UBATCH=128
+N_THREADS=4
+USE_MMAP=true
+USE_MLOCK=false
+CACHE_TYPE_K=f16
+CACHE_TYPE_V=f16
 ```
+
+---
+
+## RAM Optimization & Architecture
+
+Vict is optimized to run comfortably within a **~2 GB RAM** footprint:
+
+- **Single Model Instance**: Exactly one shared local GGUF model instance is initialized at startup and reused for chat responses and memory consolidation.
+- **Global FIFO Generation Queue**: Guarantees only 1 active inference operation runs at a time, preventing memory spikes and context conflicts.
+- **Disk-Backed Persistent Memory**: Persistent memory lives in `data/memory.txt` and is loaded on-demand per request rather than stored as an unconstrained in-memory duplicate.
+- **Configurable Context & Batch Sizes**:
+  - `N_CTX=4096`: Default context window limit.
+  - `N_BATCH=128`, `N_UBATCH=128`: Modest prompt processing batch sizes.
+  - `USE_MMAP=true`, `USE_MLOCK=false`: Memory mapping enabled; mlock disabled so the model is not forced into physical RAM.
+  - `CACHE_TYPE_K=f16`, `CACHE_TYPE_V=f16`: F16 KV cache precision.
+  - `N_THREADS=4`: Default CPU thread count.
 
 ---
 
@@ -103,19 +130,6 @@ python3 bot.py
 
 ---
 
-## Global FIFO Generation Queue Architecture
-
-Vict operates on low-resource hardware (~2 GB RAM) with a single local GGUF model instance.
-
-To prevent concurrent inference conflicts, race conditions, or elevated memory usage, Vict implements a single global asynchronous FIFO queue (`asyncio.Queue` + background worker):
-
-- Requests from `/talk` and passive `hey vict` triggers are placed into the shared queue upon receipt.
-- Requests are processed sequentially in strict arrival order (A → B → C).
-- Model generation runs asynchronously in a worker thread (`asyncio.to_thread`) to ensure Discord's event loop remains fully responsive.
-- Operating status can be monitored using `/check status` (reports `AI/Model: Ready` vs `Generating` and `Queue Waiting: X`).
-
----
-
 ## Interaction Methods
 
 ### 1. Passive Trigger (`hey vict`)
@@ -125,7 +139,7 @@ Vict responds to normal messages **only when they start with `hey vict`** (case-
 - **Does NOT trigger**: `yo hey vict`, `well hey vict`, `heyy vict`, `heyvict`, `hey victory`
 
 ### 2. Slash Commands
-- `/check status`: Displays operational status, AI status (`Ready` / `Generating`), waiting queue length, short-term message count, persistent memory size, and configured limits.
+- `/check status`: Displays operational status, RAM usage, model loaded state, context size, waiting queue length, short-term message count, persistent memory size, and configured limits.
 - `/talk [input]`: Explicit slash command interaction with full input validation and rate-limited response streaming.
 
 ---
