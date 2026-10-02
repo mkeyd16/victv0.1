@@ -10,11 +10,11 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo Checking required Python packages (discord.py and llama-cpp-python)...
-py -3.14 -c "import discord; from llama_cpp import Llama" >nul 2>&1
+echo Checking required Python packages (discord.py, psutil, llama-cpp-python)...
+py -3.14 -c "import discord; import psutil; from llama_cpp import Llama" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Required Python packages are missing.
-    echo Please ensure discord.py and llama-cpp-python are installed in Python 3.14.
+    echo Please ensure discord.py, psutil, and llama-cpp-python are installed in Python 3.14.
     pause
     exit /b 1
 )

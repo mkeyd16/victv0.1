@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from typing import Optional, Any
@@ -29,28 +30,18 @@ brain = Brain()
 
 
 def get_ram_usage_str() -> str:
-    """Returns formatted RAM usage string of the current process (MB or GB)."""
+    """Returns human-readable RSS RAM usage string of the current Vict process."""
     try:
         import psutil
-        process = psutil.Process()
-        mem_bytes = process.memory_info().rss
-        mem_mb = mem_bytes / (1024 * 1024)
+        process = psutil.Process(os.getpid())
+        rss_bytes = process.memory_info().rss
+        mem_mb = rss_bytes / (1024 * 1024)
         if mem_mb >= 1024:
-            return f"{mem_mb / 1024:.1f} GB"
-        return f"{mem_mb:.1f} MB"
-    except Exception:
-        pass
-
-    try:
-        import resource
-        mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-        if mem_mb >= 1024:
-            return f"{mem_mb / 1024:.1f} GB"
-        return f"{mem_mb:.1f} MB"
-    except Exception:
-        pass
-
-    return "Unknown"
+            return f"{mem_mb / 1024:.2f} GB"
+        return f"{int(round(mem_mb))} MB"
+    except Exception as e:
+        logger.warning(f"Failed to measure process RAM via psutil: {e}")
+        return "Unavailable"
 
 
 @dataclass
@@ -152,6 +143,13 @@ async def process_queue_item(item: QueueItem):
         logger.error(f"Error during Vict reply generation for user {item.username}: {e}")
         if not final_generated_text:
             final_generated_text = "Sorry, I ran into an error generating a reply."
+
+    # Safeguard to ensure final_generated_text is never empty
+    if not final_generated_text or final_generated_text == "...":
+        if latest_response_text and latest_response_text != "...":
+            final_generated_text = latest_response_text
+        else:
+            final_generated_text = "I am thinking, but I have nothing to say right now!"
 
     final_content = f"@{item.username.lstrip('@')}: {item.clean_display}\n\n`{final_generated_text}`"
     try:

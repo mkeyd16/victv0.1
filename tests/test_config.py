@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 
 import config
 from brain import Brain, get_ggml_type
+import bot as bot_module
 
 
 def test_config_ram_defaults():
@@ -53,3 +54,27 @@ def test_brain_initializes_with_low_memory_config(tmp_path):
             type_v=1,
             verbose=False,
         )
+
+
+def test_get_ram_usage_str_mb():
+    mock_process = MagicMock()
+    mock_process.memory_info.return_value = MagicMock(rss=778051584)  # 742 MB
+
+    with patch("psutil.Process", return_value=mock_process):
+        ram_str = bot_module.get_ram_usage_str()
+        assert ram_str == "742 MB"
+
+
+def test_get_ram_usage_str_gb():
+    mock_process = MagicMock()
+    mock_process.memory_info.return_value = MagicMock(rss=1342177280)  # 1.25 GB
+
+    with patch("psutil.Process", return_value=mock_process):
+        ram_str = bot_module.get_ram_usage_str()
+        assert ram_str == "1.25 GB"
+
+
+def test_get_ram_usage_str_failure_returns_unavailable():
+    with patch("psutil.Process", side_effect=RuntimeError("psutil error")):
+        ram_str = bot_module.get_ram_usage_str()
+        assert ram_str == "Unavailable"
